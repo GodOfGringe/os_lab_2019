@@ -12,23 +12,84 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include <pthread.h>
+#include <stdint.h>
+#include "multimodulo.h"
+#define MAX_SERVERS 255
+
 struct Server {
   char ip[255];
   int port;
 };
 
-uint64_t MultModulo(uint64_t a, uint64_t b, uint64_t mod) {
-  uint64_t result = 0;
-  a = a % mod;
-  while (b > 0) {
-    if (b % 2 == 1)
-      result = (result + a) % mod;
-    a = (a * 2) % mod;
-    b /= 2;
-  }
+struct Task {
+    struct Server server;
 
-  return result % mod;
+    uint64_t begin;
+    uint64_t end;
+    uint64_t mod;
+    uint64_t result;
+    bool ok;
+};
+
+
+
+void *Worker(void *arg) {
+    struct Task *task = arg;
+    task->ok = false;
+
+    struct hostent *hostname = gethostbyname(task->server.ip);
+    if (hostname == NULL) {
+        fprintf(stderr, "gethostbyname failed with %s\n",
+                task->server.ip);
+        return NULL;
+    }
+
+    struct sockaddr_in server = {0};
+    server.sin_family = AF_INET;
+    server.sin_port = htons(task->server.port);
+    memcpy(&server.sin_addr, hostname->h_addr,
+           sizeof(server.sin_addr));
+
+    int sck = socket(AF_INET, SOCK_STREAM, 0);
+    if (sck < 0) {
+        fprintf(stderr, "Socket creation failed!\n");
+        return NULL;
+    }
+
+    if (connect(sck, (struct sockaddr *)&server, sizeof(server)) < 0) {
+        fprintf(stderr, "Connection failed\n");
+        close(sck);
+        return NULL;
+    }
+
+    uint64_t values[3] = {
+        task->begin,
+        task->end,
+        task->mod
+    };
+
+    if (send(sck, values, sizeof(values), 0) < 0) {
+        fprintf(stderr, "Send failed\n");
+        close(sck);
+        return NULL;
+    }
+
+    uint64_t response = 0;
+
+    if (recv(sck, &response, sizeof(response), 0) <= 0) {
+        fprintf(stderr, "Receive failed\n");
+        close(sck);
+        return NULL;
+    }
+
+    task->result = response;
+    task->ok = true;
+
+    close(sck);
+    return NULL;
 }
+
 
 bool ConvertStringToUI64(const char *str, uint64_t *val) {
   char *end = NULL;
@@ -97,68 +158,142 @@ int main(int argc, char **argv) {
             argv[0]);
     return 1;
   }
+  if (k == 0 || mod == 0) {
+    fprintf(stderr, "Invalid k or mod\n");
+    return 1;
+}
 
-  // TODO: for one server here, rewrite with servers from file
-  unsigned int servers_num = 1;
-  struct Server *to = malloc(sizeof(struct Server) * servers_num);
-  // TODO: delete this and parallel work between servers
-  to[0].port = 20001;
-  memcpy(to[0].ip, "127.0.0.1", sizeof("127.0.0.1"));
+  // Открываем файл со списком серверов
+  FILE *file = fopen(servers, "r");
+  if (file == NULL) {
+      perror("Cannot open servers file");
+      return 1;
+  }
+
+  // Выделяем память под список серверов
+  struct Server *to = malloc(sizeof(struct Server) * MAX_SERVERS);
+  if (to == NULL) {
+      perror("malloc failed");
+      fclose(file);
+      return 1;
+  }
+
+  unsigned int servers_num = 0;
+  char line[512];
+
+  // Читаем файл построчно
+  while (fgets(line, sizeof(line), file) != NULL) {
+      // Убираем перевод строки в конце
+      line[strcspn(line, "\r\n")] = '\0';
+
+      // Пропускаем пустые строки
+      if (line[0] == '\0') {
+          continue;
+      }
+
+      // Проверяем, что серверов не слишком много
+      if (servers_num >= MAX_SERVERS) {
+          fprintf(stderr, "Too many servers\n");
+          free(to);
+          fclose(file);
+          return 1;
+      }
+
+      // Разбираем строку формата IP:PORT
+      if (sscanf(line, "%254[^:]:%d",
+                to[servers_num].ip,
+                &to[servers_num].port) != 2) {
+          fprintf(stderr, "Invalid server address: %s\n", line);
+          free(to);
+          fclose(file);
+          return 1;
+      }
+
+      servers_num++;
+  }
+
+  fclose(file);
+
+  if (servers_num == 0) {
+      fprintf(stderr, "No servers found in file\n");
+      free(to);
+      return 1;
+  }
+  if (servers_num > k) {
+    fprintf(stderr, "Number of servers cannot exceed k\n");
+    free(to);
+    return 1;
+}
+  
 
   // TODO: work continiously, rewrite to make parallel
-  for (int i = 0; i < servers_num; i++) {
-    struct hostent *hostname = gethostbyname(to[i].ip);
-    if (hostname == NULL) {
-      fprintf(stderr, "gethostbyname failed with %s\n", to[i].ip);
-      exit(1);
-    }
+  // Создаём массив задач и массив потоков
+  struct Task *tasks = malloc(sizeof(struct Task) * servers_num);
+  pthread_t *threads = malloc(sizeof(pthread_t) * servers_num);
 
-    struct sockaddr_in server;
-    server.sin_family = AF_INET;
-    server.sin_port = htons(to[i].port);
-    server.sin_addr.s_addr = *((unsigned long *)hostname->h_addr);
-
-    int sck = socket(AF_INET, SOCK_STREAM, 0);
-    if (sck < 0) {
-      fprintf(stderr, "Socket creation failed!\n");
-      exit(1);
-    }
-
-    if (connect(sck, (struct sockaddr *)&server, sizeof(server)) < 0) {
-      fprintf(stderr, "Connection failed\n");
-      exit(1);
-    }
-
-    // TODO: for one server
-    // parallel between servers
-    uint64_t begin = 1;
-    uint64_t end = k;
-
-    char task[sizeof(uint64_t) * 3];
-    memcpy(task, &begin, sizeof(uint64_t));
-    memcpy(task + sizeof(uint64_t), &end, sizeof(uint64_t));
-    memcpy(task + 2 * sizeof(uint64_t), &mod, sizeof(uint64_t));
-
-    if (send(sck, task, sizeof(task), 0) < 0) {
-      fprintf(stderr, "Send failed\n");
-      exit(1);
-    }
-
-    char response[sizeof(uint64_t)];
-    if (recv(sck, response, sizeof(response), 0) < 0) {
-      fprintf(stderr, "Recieve failed\n");
-      exit(1);
-    }
-
-    // TODO: from one server
-    // unite results
-    uint64_t answer = 0;
-    memcpy(&answer, response, sizeof(uint64_t));
-    printf("answer: %llu\n", answer);
-
-    close(sck);
+  if (tasks == NULL || threads == NULL) {
+      perror("malloc failed");
+      free(tasks);
+      free(threads);
+      free(to);
+      return 1;
   }
+
+  // Распределяем числа от 1 до k между серверами
+  uint64_t chunk = k / servers_num;
+  uint64_t remainder = k % servers_num;
+  uint64_t begin = 1;
+
+  for (unsigned int i = 0; i < servers_num; i++) {
+      tasks[i].server = to[i];
+      tasks[i].begin = begin;
+      tasks[i].end = begin + chunk - 1;
+
+      // Первым remainder серверам добавляем по одному числу
+      if (remainder > 0) {
+          tasks[i].end++;
+          remainder--;
+      }
+
+      tasks[i].mod = mod;
+      tasks[i].result = 1;
+      tasks[i].ok = false;
+
+      begin = tasks[i].end + 1;
+  }
+
+  // Запускаем отдельный поток для каждого сервера
+  for (unsigned int i = 0; i < servers_num; i++) {
+      if (pthread_create(&threads[i], NULL, Worker, &tasks[i]) != 0) {
+          fprintf(stderr, "pthread_create failed\n");
+          return 1;
+      }
+  }
+
+  // Ждём завершения всех потоков
+  for (unsigned int i = 0; i < servers_num; i++) {
+      pthread_join(threads[i], NULL);
+  }
+
+  // Объединяем результаты серверов
+  uint64_t answer = 1;
+
+  for (unsigned int i = 0; i < servers_num; i++) {
+      if (!tasks[i].ok) {
+          fprintf(stderr, "Failed to get result from server %u\n", i);
+          free(tasks);
+          free(threads);
+          free(to);
+          return 1;
+      }
+
+      answer = MultModulo(answer, tasks[i].result, mod);
+  }
+
+  printf("answer: %llu\n", (unsigned long long)answer);
+
+  free(tasks);
+  free(threads);
   free(to);
 
-  return 0;
 }

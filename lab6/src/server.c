@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdint.h>
 
 #include <getopt.h>
 #include <netinet/in.h>
@@ -11,38 +12,33 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include "pthread.h"
+#include <pthread.h>
+#include "multimodulo.h"
 
 struct FactorialArgs {
   uint64_t begin;
   uint64_t end;
   uint64_t mod;
+  uint64_t result;
 };
 
-uint64_t MultModulo(uint64_t a, uint64_t b, uint64_t mod) {
-  uint64_t result = 0;
-  a = a % mod;
-  while (b > 0) {
-    if (b % 2 == 1)
-      result = (result + a) % mod;
-    a = (a * 2) % mod;
-    b /= 2;
-  }
-
-  return result % mod;
-}
 
 uint64_t Factorial(const struct FactorialArgs *args) {
-  uint64_t ans = 1;
+    uint64_t ans = 1;
 
-  // TODO: your code here
+    for (uint64_t i = args->begin; i <= args->end; i++) {
+        ans = MultModulo(ans, i, args->mod);
+    }
 
-  return ans;
+    return ans;
 }
 
 void *ThreadFactorial(void *args) {
-  struct FactorialArgs *fargs = (struct FactorialArgs *)args;
-  return (void *)(uint64_t *)Factorial(fargs);
+    struct FactorialArgs *fargs = args;
+
+    fargs->result = Factorial(fargs);
+
+    return NULL;
 }
 
 int main(int argc, char **argv) {
@@ -88,6 +84,11 @@ int main(int argc, char **argv) {
 
   if (port == -1 || tnum == -1) {
     fprintf(stderr, "Using: %s --port 20001 --tnum 4\n", argv[0]);
+    return 1;
+  }
+
+  if (tnum <= 0 || port <= 0 || port > 65535) {
+    fprintf(stderr, "Invalid port or thread count\n");
     return 1;
   }
 
@@ -145,7 +146,6 @@ int main(int argc, char **argv) {
         break;
       }
 
-      pthread_t threads[tnum];
 
       uint64_t begin = 0;
       uint64_t end = 0;
@@ -156,25 +156,46 @@ int main(int argc, char **argv) {
 
       fprintf(stdout, "Receive: %llu %llu %llu\n", begin, end, mod);
 
+      
+      pthread_t threads[tnum];
       struct FactorialArgs args[tnum];
-      for (uint32_t i = 0; i < tnum; i++) {
-        // TODO: parallel somehow
-        args[i].begin = 1;
-        args[i].end = 1;
-        args[i].mod = mod;
 
-        if (pthread_create(&threads[i], NULL, ThreadFactorial,
-                           (void *)&args[i])) {
-          printf("Error: pthread_create failed!\n");
-          return 1;
-        }
+      // Шаг 1. Распределяем диапазон между потоками
+      uint64_t step = (end - begin + 1) / tnum;
+      uint64_t remain = (end - begin + 1) % tnum;
+      uint64_t current = begin;
+
+      for (int i = 0; i < tnum; i++) {
+          args[i].begin = current;
+          args[i].end = current + step - 1;
+
+          if (remain > 0) {
+              args[i].end++;
+              remain--;
+          }
+
+          args[i].mod = mod;
+          args[i].result = 1;
+
+          current = args[i].end + 1;
+      }
+
+      // Шаг 2. Запускаем потоки
+      for (int i = 0; i < tnum; i++) {
+      if (pthread_create(&threads[i], NULL, ThreadFactorial, &args[i]) != 0) {
+          fprintf(stderr, "pthread_create failed\n");
+          exit(1);
+          }
+      }
+
+      for (int i = 0; i < tnum; i++) {
+          pthread_join(threads[i], NULL);
       }
 
       uint64_t total = 1;
-      for (uint32_t i = 0; i < tnum; i++) {
-        uint64_t result = 0;
-        pthread_join(threads[i], (void **)&result);
-        total = MultModulo(total, result, mod);
+
+      for (int i = 0; i < tnum; i++) {
+          total = MultModulo(total, args[i].result, mod);
       }
 
       printf("Total: %llu\n", total);
