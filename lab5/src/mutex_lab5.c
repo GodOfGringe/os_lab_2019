@@ -50,16 +50,21 @@ int main(int argc, char *argv[])
 
     pthread_mutex_init(&mutex, NULL);
 
-    int part = k / pnum;
+    
+    int step = k / pnum;
+    int remain = k % pnum;
+    int current = 1;
 
     for (int i = 0; i < pnum; i++) {
+        data[i].start = current;
+        data[i].end = current + step - 1;
 
-        data[i].start = i * part + 1;
+        if (remain > 0) {
+            data[i].end++;
+            remain--;
+        }
 
-        if (i == pnum - 1)
-            data[i].end = k;
-        else
-            data[i].end = (i + 1) * part;
+        current = data[i].end + 1;
 
         pthread_create(
             &threads[i],
@@ -67,6 +72,8 @@ int main(int argc, char *argv[])
             factorial,
             &data[i]
         );
+    }
+
     }
 
     for (int i = 0; i < pnum; i++)
