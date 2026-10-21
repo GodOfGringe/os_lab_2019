@@ -74,7 +74,7 @@ int main(int argc, char *argv[])
         );
     }
 
-    }
+    
 
     for (int i = 0; i < pnum; i++)
         pthread_join(threads[i], NULL);
